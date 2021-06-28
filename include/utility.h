@@ -7,6 +7,9 @@
 #include <std_msgs/Header.h>
 #include <std_msgs/Float64MultiArray.h>
 #include <sensor_msgs/Imu.h>
+#include "roscpp_tutorials/Localization.h"
+#include "roscpp_tutorials/Odometry.h"
+#include "roscpp_tutorials/IMURaw.h"
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/NavSatFix.h>
 #include <nav_msgs/Odometry.h>
@@ -274,6 +277,67 @@ public:
         }
 
         return imu_out;
+    }
+
+    sensor_msgs::Imu imuConverter(const roscpp_tutorials::Localization& imu_in)
+    { 
+        // std::cout << "ImuConverter!"<<std::endl;
+        sensor_msgs::Imu imu_out;
+        imu_out.header.stamp = imu_in.measured_timestamp;
+        imu_out.header.frame_id = "base_link";
+        imu_out.header.seq = imu_in.header.sequence_num;
+        // rotate acceleration
+        Eigen::Vector3d acc(imu_in.linear_acceleration[0], imu_in.linear_acceleration[1], imu_in.linear_acceleration[2]);
+        acc = extRot * acc;
+        imu_out.linear_acceleration.x = acc.x();
+        imu_out.linear_acceleration.y = acc.y();
+        imu_out.linear_acceleration.z = acc.z();
+        // rotate gyroscope
+        Eigen::Vector3d gyr(imu_in.angular_velocity[0], imu_in.angular_velocity[1], imu_in.angular_velocity[2]);
+        gyr = extRot * gyr;
+        imu_out.angular_velocity.x = gyr.x();
+        imu_out.angular_velocity.y = gyr.y();
+        imu_out.angular_velocity.z = gyr.z();
+        // rotate roll pitch yaw
+        Eigen::Quaterniond q_from(imu_in.orientation.w, imu_in.orientation.x, imu_in.orientation.y, imu_in.orientation.z);
+        Eigen::Quaterniond q_final = q_from * extQRPY;
+        imu_out.orientation.x = q_final.x();
+        imu_out.orientation.y = q_final.y();
+        imu_out.orientation.z = q_final.z();
+        imu_out.orientation.w = q_final.w();
+
+        if (sqrt(q_final.x()*q_final.x() + q_final.y()*q_final.y() + q_final.z()*q_final.z() + q_final.w()*q_final.w()) < 0.1)
+        {
+            ROS_ERROR("Invalid quaternion, please use a 9-axis IMU!");
+            ros::shutdown();
+        }
+
+        return imu_out;
+    }
+
+    nav_msgs::Odometry odomConverter(
+        const roscpp_tutorials::Odometry::ConstPtr &odometryMsg) {
+      nav_msgs::Odometry odom_out;
+      odom_out.header.seq = static_cast<uint64_t>(odometryMsg->header.sequence_num);
+      odom_out.header.stamp =
+          ros::Time().fromSec(odometryMsg->header.measured_timestamp * 1e-6);
+      odom_out.header.frame_id = "novatel";
+      odom_out.child_frame_id = "world";
+      odom_out.pose.pose.position.x = odometryMsg->position[0];
+      odom_out.pose.pose.position.y = odometryMsg->position[1];
+      odom_out.pose.pose.position.z = odometryMsg->position[2];
+      odom_out.pose.pose.orientation.x = odometryMsg->orientation.x;
+      odom_out.pose.pose.orientation.y = odometryMsg->orientation.y;
+      odom_out.pose.pose.orientation.z = odometryMsg->orientation.z;
+      odom_out.pose.pose.orientation.w = odometryMsg->orientation.w;
+      
+      odom_out.twist.twist.linear.x = odometryMsg->linear_velocity[0];
+      odom_out.twist.twist.linear.y = odometryMsg->linear_velocity[1];
+      odom_out.twist.twist.linear.z = odometryMsg->linear_velocity[2];
+      odom_out.twist.twist.angular.x = odometryMsg->angular_velocity[0];
+      odom_out.twist.twist.angular.y = odometryMsg->angular_velocity[1];
+      odom_out.twist.twist.angular.z = odometryMsg->angular_velocity[2];
+      return odom_out;
     }
 };
 

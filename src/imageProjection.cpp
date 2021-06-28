@@ -89,8 +89,10 @@ public:
     ImageProjection():
     deskewFlag(0)
     {
-        subImu        = nh.subscribe<sensor_msgs::Imu>(imuTopic, 2000, &ImageProjection::imuHandler, this, ros::TransportHints().tcpNoDelay());
+        // subImu        = nh.subscribe<sensor_msgs::Imu>(imuTopic, 2000, &ImageProjection::imuHandler, this, ros::TransportHints().tcpNoDelay());
+        subImu      = nh.subscribe<roscpp_tutorials::Localization>  (imuTopic,                   2000, &ImageProjection::imuHandler,      this, ros::TransportHints().tcpNoDelay());
         subOdom       = nh.subscribe<nav_msgs::Odometry>(odomTopic+"_incremental", 2000, &ImageProjection::odometryHandler, this, ros::TransportHints().tcpNoDelay());
+        // subOdom       = nh.subscribe<nav_msgs::Odometry>(odomTopic, 2000, &ImageProjection::odometryHandler, this, ros::TransportHints().tcpNoDelay());
         subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>(pointCloudTopic, 5, &ImageProjection::cloudHandler, this, ros::TransportHints().tcpNoDelay());
 
         pubExtractedCloud = nh.advertise<sensor_msgs::PointCloud2> ("lio_sam/deskew/cloud_deskewed", 1);
@@ -167,10 +169,43 @@ public:
         // cout << "roll: " << imuRoll << ", pitch: " << imuPitch << ", yaw: " << imuYaw << endl << endl;
     }
 
+    void imuHandler(const roscpp_tutorials::Localization::ConstPtr& imuMsg)
+    {
+        sensor_msgs::Imu thisImu = imuConverter(*imuMsg);
+
+        std::lock_guard<std::mutex> lock1(imuLock);
+        imuQueue.push_back(thisImu);
+
+        // debug IMU data
+        // cout << std::setprecision(6);
+        // cout << "IMU acc: " << endl;
+        // cout << "x: " << thisImu.linear_acceleration.x << 
+        //       ", y: " << thisImu.linear_acceleration.y << 
+        //       ", z: " << thisImu.linear_acceleration.z << endl;
+        // cout << "IMU gyro: " << endl;
+        // cout << "x: " << thisImu.angular_velocity.x << 
+        //       ", y: " << thisImu.angular_velocity.y << 
+        //       ", z: " << thisImu.angular_velocity.z << endl;
+        // double imuRoll, imuPitch, imuYaw;
+        // tf::Quaternion orientation;
+        // tf::quaternionMsgToTF(thisImu.orientation, orientation);
+        // tf::Matrix3x3(orientation).getRPY(imuRoll, imuPitch, imuYaw);
+        // cout << "IMU roll pitch yaw: " << endl;
+        // cout << "roll: " << imuRoll << ", pitch: " << imuPitch << ", yaw: " << imuYaw << endl << endl;
+    }
+
     void odometryHandler(const nav_msgs::Odometry::ConstPtr& odometryMsg)
     {
         std::lock_guard<std::mutex> lock2(odoLock);
         odomQueue.push_back(*odometryMsg);
+    }
+
+    void odometryHandler(const roscpp_tutorials::Odometry::ConstPtr& odometryMsg)
+    {
+        std::lock_guard<std::mutex> lock2(odoLock);
+        nav_msgs::Odometry odom;
+        odom = odomConverter(odometryMsg);
+        odomQueue.push_back(odom);
     }
 
     void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
@@ -202,7 +237,8 @@ public:
         cloudQueue.pop_front();
         if (sensor == SensorType::VELODYNE)
         {
-            pcl::moveFromROSMsg(currentCloudMsg, *laserCloudIn);
+            // pcl::moveFromROSMsg(currentCloudMsg, *laserCloudIn);
+            toPclPointCloudFromROSMsg(currentCloudMsg, laserCloudIn);
         }
         else if (sensor == SensorType::OUSTER)
         {
@@ -231,6 +267,7 @@ public:
         // get timestamp
         cloudHeader = currentCloudMsg.header;
         timeScanCur = cloudHeader.stamp.toSec();
+        // timeScanCur = laserCloudIn->points.front().time;
         timeScanEnd = timeScanCur + laserCloudIn->points.back().time;
 
         // check dense flag
@@ -266,7 +303,7 @@ public:
             deskewFlag = -1;
             for (auto &field : currentCloudMsg.fields)
             {
-                if (field.name == "time" || field.name == "t")
+                if (field.name == "time" || field.name == "t" || field.name == "timestamp")
                 {
                     deskewFlag = 1;
                     break;
@@ -275,7 +312,7 @@ public:
             if (deskewFlag == -1)
                 ROS_WARN("Point cloud timestamp not available, deskew function disabled, system will drift significantly!");
         }
-
+        // std::cout << "flag: " << ringFlag << "," <<deskewFlag << std::endl;
         return true;
     }
 
@@ -581,6 +618,7 @@ public:
                     ++count;
                 }
             }
+            // std::cout << "cloudExtraction count:"<< count<< std::endl;
             cloudInfo.endRingIndex[i] = count -1 - 5;
         }
     }
@@ -590,6 +628,87 @@ public:
         cloudInfo.header = cloudHeader;
         cloudInfo.cloud_deskewed  = publishCloud(&pubExtractedCloud, extractedCloud, cloudHeader.stamp, lidarFrame);
         pubLaserCloudInfo.publish(cloudInfo);
+    }
+
+    void toPclPointCloudFromROSMsg(const sensor_msgs::PointCloud2 &ros_msg,
+                                   pcl::PointCloud<PointXYZIRT>::Ptr& pc) {
+      pc->points.clear();
+      static int seq_num = 0;
+
+      int x_offset = 0, y_offset = 0, z_offset = 0, ring_offset = 0,
+          time_offset = 0;
+      int x_size = 0, y_size = 0, z_size = 0, ring_size = 0,
+          time_size = 0;
+      for (int i = 0; i < ros_msg.fields.size(); i++) {
+        const auto &f = ros_msg.fields[i];
+        if (f.name == "x") {
+          x_offset = 0;
+          x_size = 4;
+        }
+        if (f.name == "y") {
+          y_offset = 4;
+          y_size = 4;
+        }
+        if (f.name == "z") {
+          z_offset = 8;
+          z_size = 4;
+        }
+        if (f.name == "ring") {
+          ring_offset = 13;
+          ring_size = 1;
+        }
+        if (f.name == "timestamp") {
+          time_offset = 16;
+          time_size = 8;
+        }
+      }
+
+      pc->is_dense = true;
+      pc->header.frame_id = "velodyne";
+      pc->header.stamp =
+          static_cast<uint64_t>(ros_msg.header.stamp.toSec() * 1e6);
+      int point_step = ros_msg.point_step;
+      int total = ros_msg.height * ros_msg.width;
+      pc->points.resize(total);
+      int point_cnt = 0;
+      double first_timestamp = 0;
+      for (int i = 0; i < total; i++) {
+        int offset = i * point_step;
+        float x_value = 0, y_value = 0, z_value = 0;
+        uint8_t ring = 0;
+        double timestamp = 0 ;
+        if (i == 0){
+           memcpy(&first_timestamp, &ros_msg.data[offset + time_offset], time_size);
+        //    std::cout << "first_timestamp:"<< std::fixed << first_timestamp << std::endl;
+        }
+        memcpy(&x_value, &ros_msg.data[offset + x_offset], x_size);
+        if (!std::isnan(x_value)) {
+          memcpy(&y_value, &ros_msg.data[offset + y_offset], y_size);
+          memcpy(&z_value, &ros_msg.data[offset + z_offset], z_size);
+          //   memcpy(&ring,&ros_msg.data[offset + ring_offset],ring_size);
+          memcpy(&timestamp, &ros_msg.data[offset + time_offset], time_size);
+          pc->points[point_cnt].x = x_value;
+          pc->points[point_cnt].y = y_value;
+          pc->points[point_cnt].z = z_value;
+          // calculate ring
+          float verticalAngle =
+              atan2(z_value, sqrt(x_value * x_value + y_value * y_value)) *
+              180 / M_PI;
+          int ring = (verticalAngle + 15.1) / 2.0;
+          pc->points[point_cnt].ring = static_cast<uint16_t>(ring);
+          pc->points[point_cnt].time = static_cast<float>(timestamp-first_timestamp);
+          point_cnt++;
+        }
+      }
+      pc->points.resize(point_cnt);
+      pc->height = 1;
+      pc->width = point_cnt;
+      seq_num++;
+      // debug info
+    //   if (seq_num == 2) {
+    //     pcl::io::savePCDFileASCII("/home/cui-pc/data/chongqing/2.pcd", *pc);
+    //   }
+    //   std::cout << "point size:" << pc->points.size()<< std::endl;
     }
 };
 

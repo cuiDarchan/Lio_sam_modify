@@ -204,7 +204,8 @@ public:
 
     IMUPreintegration()
     {
-        subImu      = nh.subscribe<sensor_msgs::Imu>  (imuTopic,                   2000, &IMUPreintegration::imuHandler,      this, ros::TransportHints().tcpNoDelay());
+        // subImu      = nh.subscribe<sensor_msgs::Imu>  (imuTopic,                   2000, &IMUPreintegration::imuHandler,      this, ros::TransportHints().tcpNoDelay());
+        subImu      = nh.subscribe<roscpp_tutorials::Localization>  (imuTopic,                   2000, &IMUPreintegration::imuHandler,      this, ros::TransportHints().tcpNoDelay());
         subOdometry = nh.subscribe<nav_msgs::Odometry>("lio_sam/mapping/odometry_incremental", 5,    &IMUPreintegration::odometryHandler, this, ros::TransportHints().tcpNoDelay());
 
         pubImuOdometry = nh.advertise<nav_msgs::Odometry> (odomTopic+"_incremental", 2000);
@@ -454,6 +455,56 @@ public:
     }
 
     void imuHandler(const sensor_msgs::Imu::ConstPtr& imu_raw)
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+
+        sensor_msgs::Imu thisImu = imuConverter(*imu_raw);
+
+        imuQueOpt.push_back(thisImu);
+        imuQueImu.push_back(thisImu);
+
+        if (doneFirstOpt == false)
+            return;
+
+        double imuTime = ROS_TIME(&thisImu);
+        double dt = (lastImuT_imu < 0) ? (1.0 / 500.0) : (imuTime - lastImuT_imu);
+        lastImuT_imu = imuTime;
+
+        // integrate this single imu message
+        imuIntegratorImu_->integrateMeasurement(gtsam::Vector3(thisImu.linear_acceleration.x, thisImu.linear_acceleration.y, thisImu.linear_acceleration.z),
+                                                gtsam::Vector3(thisImu.angular_velocity.x,    thisImu.angular_velocity.y,    thisImu.angular_velocity.z), dt);
+
+        // predict odometry
+        gtsam::NavState currentState = imuIntegratorImu_->predict(prevStateOdom, prevBiasOdom);
+
+        // publish odometry
+        nav_msgs::Odometry odometry;
+        odometry.header.stamp = thisImu.header.stamp;
+        odometry.header.frame_id = odometryFrame;
+        odometry.child_frame_id = "odom_imu";
+
+        // transform imu pose to ldiar
+        gtsam::Pose3 imuPose = gtsam::Pose3(currentState.quaternion(), currentState.position());
+        gtsam::Pose3 lidarPose = imuPose.compose(imu2Lidar);
+
+        odometry.pose.pose.position.x = lidarPose.translation().x();
+        odometry.pose.pose.position.y = lidarPose.translation().y();
+        odometry.pose.pose.position.z = lidarPose.translation().z();
+        odometry.pose.pose.orientation.x = lidarPose.rotation().toQuaternion().x();
+        odometry.pose.pose.orientation.y = lidarPose.rotation().toQuaternion().y();
+        odometry.pose.pose.orientation.z = lidarPose.rotation().toQuaternion().z();
+        odometry.pose.pose.orientation.w = lidarPose.rotation().toQuaternion().w();
+        
+        odometry.twist.twist.linear.x = currentState.velocity().x();
+        odometry.twist.twist.linear.y = currentState.velocity().y();
+        odometry.twist.twist.linear.z = currentState.velocity().z();
+        odometry.twist.twist.angular.x = thisImu.angular_velocity.x + prevBiasOdom.gyroscope().x();
+        odometry.twist.twist.angular.y = thisImu.angular_velocity.y + prevBiasOdom.gyroscope().y();
+        odometry.twist.twist.angular.z = thisImu.angular_velocity.z + prevBiasOdom.gyroscope().z();
+        pubImuOdometry.publish(odometry);
+    }
+
+    void imuHandler(const roscpp_tutorials::Localization::ConstPtr& imu_raw)
     {
         std::lock_guard<std::mutex> lock(mtx);
 
